@@ -1,8 +1,8 @@
-import { useMemo } from 'react'
+import { useMemo, useSyncExternalStore } from 'react'
 import { Pressable, StyleSheet, Text, View, SectionList } from 'react-native'
 import type { Bot, Room } from '../connection.ts'
 import { useTeam } from '../team/context.tsx'
-import { seenAt } from '../team/seen.ts'
+import { isUnread, seenVersion, subscribeSeen } from '../team/seen.ts'
 import { t } from '../ui/i18n.ts'
 import { radius, type as typeScale, useTheme } from '../ui/tokens.ts'
 import { Avatar, RoomAvatar } from '../ui/marks.tsx'
@@ -16,48 +16,53 @@ export interface ChatTarget { kind: 'bot' | 'room'; id: string }
 // Bot as a tile on top, then the other Bots and groups as rows, pinned first, then
 // by their latest message.
 export function TeamList({ onOpen, query = '', current }: { onOpen: (target: ChatTarget) => void; query?: string; current?: string }) {
-  const { team, error } = useTeam()
+  const { team, error, computer } = useTeam()
   const { p, dark } = useTheme()
+  const hostId = computer?.hostDeviceId ?? ''
+  useSyncExternalStore(subscribeSeen, seenVersion)
 
-  const bots = team?.bots ?? []
+  const bots = Array.isArray(team?.bots) ? team.bots : []
   const mains = new Set(team?.mainBotIds ?? [])
-  const mainList = bots.filter(bot => mains.has(bot.id) && bot.hidden !== true && (query.trim() === '' || bot.name.toLowerCase().includes(query.trim().toLowerCase())))
+  const needle = query.trim().toLowerCase()
+  const mainList = bots.filter(bot => mains.has(bot.id) && bot.hidden !== true && (needle === '' || (bot.name ?? '').toLowerCase().includes(needle)))
   const workBots = team?.work?.bots ?? {}
   const workRooms = team?.work?.rooms ?? {}
   const waiting = team?.work?.waiting ?? {}
   const questions = team?.questions ?? {}
-  const approvals = team?.work?.approvals ?? []
+  const approvals = Array.isArray(team?.work?.approvals) ? team.work.approvals : []
 
   const entries = useMemo(() => {
+    const rooms = Array.isArray(team?.rooms) ? team.rooms : []
     const list = [
       ...bots.filter(bot => !mains.has(bot.id) && bot.hidden !== true).map(bot => ({ kind: 'bot' as const, item: bot })),
-      ...(team?.rooms ?? []).filter(room => room.hidden !== true).map(room => ({ kind: 'room' as const, item: room })),
+      ...rooms.filter(room => room.hidden !== true).map(room => ({ kind: 'room' as const, item: room })),
     ]
     return list
-      .filter(entry => query.trim() === '' || entry.item.name.toLowerCase().includes(query.trim().toLowerCase()))
+      .filter(entry => needle === '' || (entry.item.name ?? '').toLowerCase().includes(needle))
       .sort((a, b) => Number(Boolean(b.item.pinned)) - Number(Boolean(a.item.pinned)) || (b.item.lastAt ?? b.item.createdAt ?? 0) - (a.item.lastAt ?? a.item.createdAt ?? 0))
-  }, [bots, team?.rooms, team?.mainBotIds, query])
+  }, [bots, team?.rooms, team?.mainBotIds, needle])
 
   const preview = (bot: Bot): string | undefined => {
     const sessionId = bot.sessionId ?? bot.id
     if (questions[sessionId] !== undefined || team?.views?.[sessionId] !== undefined) return t('Waiting for your answer')
-    if (approvals.some(a => a.botId === bot.id)) return t('Waiting for your approval')
+    if (approvals.some(a => a?.botId === bot.id)) return t('Waiting for your approval')
     const doing = workBots[bot.id] ?? team?.activity?.[bot.id]
     if (doing !== undefined) return `${workPhrase(doing)}…`
-    const groupWork = Object.entries(workRooms).find(([, list]) => list.some(e => e.botId === bot.id))
-    if (groupWork) {
+    const groupWork = Object.entries(workRooms).find(([, list]) => Array.isArray(list) && list.some(e => e?.botId === bot.id))
+    const workingEntry = groupWork?.[1]?.find(e => e?.botId === bot.id)
+    if (groupWork && workingEntry !== undefined) {
       const room = team?.rooms?.find(r => r.id === groupWork[0])
-      return `${room?.name ?? t('a group chat')} · ${workPhrase(groupWork[1].find(e => e.botId === bot.id)!)}…`
+      return `${room?.name ?? t('a group chat')} · ${workPhrase(workingEntry)}…`
     }
     const waits = waiting[bot.id]
     if (waits !== undefined && (waits.bots?.length || waits.rooms?.length)) return t('Waiting for your answer')
     return cleanPreview(bot.preview) ?? bot.role
   }
   const roomPreview = (room: Room): string | undefined => {
-    if (approvals.some(a => a.roomId === room.id)) return t('Waiting for your approval')
-    const members = workRooms[room.id] ?? []
+    if (approvals.some(a => a?.roomId === room.id)) return t('Waiting for your approval')
+    const members = Array.isArray(workRooms[room.id]) ? workRooms[room.id] : []
     if (members.length > 0) {
-      const name = bots.find(b => b.id === members[0].botId)?.name ?? ''
+      const name = bots.find(b => b.id === members[0]?.botId)?.name ?? ''
       return `${name} · ${workPhrase(members[0])}…${members.length > 1 ? ` +${members.length - 1}` : ''}`
     }
     return room.preview
@@ -83,9 +88,9 @@ export function TeamList({ onOpen, query = '', current }: { onOpen: (target: Cha
           </View>
         ) : undefined}
         renderItem={({ item: entry }) => entry.kind === 'bot' ? (
-          <BotRow bot={entry.item} p={p} dark={dark} mains={mains} questions={questions} approvals={approvals} workBots={workBots} preview={preview(entry.item)} selected={current === entry.item.id} unread={entry.item.lastAt !== undefined && entry.item.lastAt > seenAt(entry.item.id)} onPress={() => onOpen({ kind: 'bot', id: entry.item.id })} />
+          <BotRow bot={entry.item} p={p} dark={dark} mains={mains} questions={questions} approvals={approvals} workBots={workBots} preview={preview(entry.item)} selected={current === entry.item.id} unread={isUnread(hostId, entry.item.id, entry.item.lastAt, current === entry.item.id)} onPress={() => onOpen({ kind: 'bot', id: entry.item.id })} />
         ) : (
-          <RoomRow room={entry.item} bots={bots} p={p} dark={dark} approvals={approvals} preview={roomPreview(entry.item)} selected={current === entry.item.id} unread={entry.item.lastAt !== undefined && entry.item.lastAt > seenAt(entry.item.id)} working={(workRooms[entry.item.id] ?? []).length > 0} onPress={() => onOpen({ kind: 'room', id: entry.item.id })} />
+          <RoomRow room={entry.item} bots={bots} p={p} dark={dark} approvals={approvals} preview={roomPreview(entry.item)} selected={current === entry.item.id} unread={isUnread(hostId, entry.item.id, entry.item.lastAt, current === entry.item.id)} working={(workRooms[entry.item.id] ?? []).length > 0} onPress={() => onOpen({ kind: 'room', id: entry.item.id })} />
         )}
         ListEmptyComponent={<Text style={[typeScale.small, { color: p.ink3, textAlign: 'center', marginTop: 40 }]}>{team === null ? t('Connecting…') : ''}</Text>}
       />
